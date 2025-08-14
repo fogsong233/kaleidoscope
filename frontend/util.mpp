@@ -1,0 +1,25 @@
+module;
+export module kaleidoscope:util;
+import std;
+
+#define uptr std::unique_ptr
+
+export namespace Kaleidoscope::Util {
+template <typename AST>
+uptr<AST> logUptrErr(const char* msg) {
+    std::cerr << std::format("Error: {}\n", msg);
+    return nullptr;
+}
+
+template <typename T>
+T* logErr(const char* msg) {
+    std::cerr << std::format("Error: {}\n", msg);
+    return nullptr;
+}
+
+template <typename>
+constexpr bool depTrue = true;
+
+}  // namespace Kaleidoscope::Util
+
+#undef uptr

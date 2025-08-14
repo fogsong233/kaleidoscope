@@ -1,0 +1,146 @@
+module;
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/ADT/APFloat.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
+export module kaleidoscope:codegen;
+import std;
+import :ast;
+import :util;
+
+#define uptr std::unique_ptr
+
+namespace Kaleidoscope::Codegen {
+using namespace llvm;
+uptr<LLVMContext> theContext;
+uptr<IRBuilder<>> IRBuilder;
+uptr<Module> theModule;
+std::map<std::string, Value*> nameValues;
+}  // namespace Kaleidoscope::Codegen
+
+export namespace Kaleidoscope {
+
+using namespace Codegen;
+
+void initLLVM() {
+    theContext = std::make_unique<LLVMContext>();
+    theModule = std::make_unique<llvm::Module>("my jit", *theContext);
+
+    IRBuilder = std::make_unique<llvm::IRBuilder<>>(*theContext);
+}
+
+#define CodegenFor(ExprName) llvm::Value* ExprName::codegen()
+
+CodegenFor(AST::NumberExpr) {
+    return llvm::ConstantFP::get(*theContext, APFloat(this->val));
+}
+
+CodegenFor(AST::VariableExpr) {
+    auto* value = nameValues[this->name];
+    if(!value) {
+        Util::logErr<llvm::Value>("Unkown variable name");
+    }
+    return value;
+}
+
+CodegenFor(AST::BinaryExpr) {
+    auto* lv = this->lhs->codegen();
+    auto* rv = this->rhs->codegen();
+    if(!lv || !rv) {
+        return nullptr;
+    }
+
+    switch(this->op) {
+        case '+': return IRBuilder->CreateFAdd(lv, rv, "addtmp");
+        case '-': return IRBuilder->CreateFSub(lv, rv, "subtmp");
+        case '*': return IRBuilder->CreateFMul(lv, rv, "multmp");
+        case '<':
+            lv = IRBuilder->CreateFCmpULT(lv, rv, "cmptmp");
+            // Convert bool 0/1 to double 0.0 or 1.0
+            return IRBuilder->CreateUIToFP(lv, Type::getDoubleTy(*theContext), "booltmp");
+        default: return Util::logErr<llvm::Value>("invalid binary operator");
+    }
+}
+
+CodegenFor(AST::CallExpr) {
+    auto* calleeFunc = theModule->getFunction(this->callee);
+    if(!calleeFunc) {
+        return Util::logErr<llvm::Value>("Unknown function to call");
+    }
+    if(this->args.size() != calleeFunc->arg_size()) {
+        return Util::logErr<llvm::Value>("Invalid argument numbers");
+    }
+
+    std::vector<llvm::Value*> argsVec;
+
+    for(const auto& arg: this->args) {
+        argsVec.push_back(arg->codegen());
+        if(!argsVec.back())
+            return nullptr;
+    }
+    // Call the function with the generated arguments
+    return IRBuilder->CreateCall(calleeFunc, argsVec, "calltmp");
+}
+
+#undef CodegenFor
+
+llvm::Function* AST::Prototype::codegen() {
+    std::vector<llvm::Type*> doublesArgs(this->args.size(), Type::getDoubleTy(*theContext));
+    auto* funcTy =
+        llvm::FunctionType::get(llvm::Type::getDoubleTy(*theContext), doublesArgs, false);
+    auto* func = llvm::Function::Create(funcTy,
+                                        llvm::Function::ExternalLinkage,
+                                        this->name,
+                                        // register in the module›
+                                        theModule.get());
+    // Set names for all arguments.
+    unsigned index = 0;
+    for(auto& arg: func->args()) {
+        arg.setName(this->args[index++]);
+    }
+    return func;
+};
+
+llvm::Function* AST::Function::codegen() {
+    auto* theFunc = theModule->getFunction(this->proto->name);
+
+    if(!theFunc) {
+        theFunc = this->proto->codegen();
+    }
+
+    if(!theFunc) {
+        return nullptr;
+    }
+
+    if(!theFunc->empty()) {
+        return Util::logErr<llvm::Function>(
+            std::format("Function {} can not be redefined", this->proto->name).c_str());
+    }
+
+    // gen the block
+    auto* basicBlock = llvm::BasicBlock::Create(*theContext, "entry", theFunc);
+    IRBuilder->SetInsertPoint(basicBlock);
+
+    nameValues.clear();
+    for(auto& arg: theFunc->args()) {
+        nameValues[std::string(arg.getName())] = &arg;
+    }
+    if(auto* retVal = this->body->codegen()) {
+        IRBuilder->CreateRet(retVal);
+        // Validate the generated code, checking for consistency.
+        llvm::verifyFunction(*theFunc);
+        return theFunc;
+    }
+    // error reading body, remove function
+    theFunc->eraseFromParent();
+    return nullptr;
+}
+};  // namespace Kaleidoscope
+
+#undef uptr

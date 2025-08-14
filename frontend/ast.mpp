@@ -1,0 +1,311 @@
+module;
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+export module kaleidoscope:ast;
+import :lexer;
+import :util;
+import std;
+
+#define uptr std::unique_ptr
+
+export namespace Kaleidoscope::AST {
+
+class Expr {
+public:
+    virtual ~Expr() = default;
+
+    virtual llvm::Value* codegen() = 0;
+};
+
+#define ExprCodegen(ExprName) llvm::Value* codegen() override;
+
+class NumberExpr : public Expr {
+public:
+    double val;
+    NumberExpr(double val) : val(val) {};
+    ExprCodegen(NumberExpr);
+};
+
+class VariableExpr : public Expr {
+public:
+    std::string name;
+    VariableExpr(const std::string& name) : name(name) {};
+    ExprCodegen(VariableExpr);
+};
+
+// a+b ...
+class BinaryExpr : public Expr {
+public:
+    char op;
+    uptr<Expr> lhs, rhs;
+
+    BinaryExpr(char op, uptr<Expr> lhs, uptr<Expr> rhs) :
+        op(op), lhs(std::move(lhs)), rhs(std::move(rhs)) {};
+
+    ExprCodegen(BinaryExpr);
+};
+
+// identifier (indentifier,...)
+class CallExpr : public Expr {
+public:
+    std::string callee;
+    std::vector<uptr<Expr>> args;
+
+    CallExpr(std::string callee, std::vector<uptr<Expr>> args) :
+        callee(callee), args(std::move(args)) {}
+
+    ExprCodegen(CallExpr);
+};
+
+/// function prototype
+/// like int fn(int a)
+class Prototype {
+public:
+    std::string name;
+    std::vector<std::string> args;
+
+    Prototype(const std::string& name, std::vector<std::string> args) :
+        name(name), args(std::move(args)) {}
+
+    const std::string& getName() const {
+        return name;
+    }
+
+    llvm::Function* codegen();
+};
+
+class Function {
+public:
+    uptr<Prototype> proto;
+    uptr<Expr> body;
+
+    Function(uptr<Prototype> proto, uptr<Expr> body) :
+        proto(std::move(proto)), body(std::move(body)) {}
+
+    llvm::Function* codegen();
+};
+
+};  // namespace Kaleidoscope::AST
+
+namespace Kaleidoscope {
+export inline int curToken;
+
+export int getNxtToken(std::istream& stream) {
+    return curToken = strParseToToken(stream);
+}
+
+}  // namespace Kaleidoscope
+
+// namespace Kaleidoscope::Util
+
+export namespace Kaleidoscope::Parser {
+using namespace AST;
+
+std::map<char, int> binopPrecedence;
+
+int getTokenPrecedence() {
+    if(!(curToken >= 0 && curToken <= 127))  // ascii
+        return -1;
+    auto tokPrecedence = binopPrecedence[curToken];
+    return tokPrecedence <= 0 ? -1 : tokPrecedence;
+}
+
+void defaultBinopPrecedenceCtor() {
+    binopPrecedence['<'] = 10;
+    binopPrecedence['+'] = 20;
+    binopPrecedence['-'] = 20;
+    binopPrecedence['*'] = 40;  // highest.
+}
+
+#define ExprParser(name) uptr<Expr> parse##name##Expr(std::istream& stream)
+
+uptr<Expr> parseExpression(std::istream& stream);
+uptr<Expr> parseBinOpRHS(int exprPrec, uptr<Expr> lhs, std::istream& stream);
+
+ExprParser(Number) {
+    auto numVal = getNumVal();
+    // consume the token
+    getNxtToken(stream);
+    return std::make_unique<NumberExpr>(numVal);
+}
+
+/// parenexpr ::= '(' expression ')'
+ExprParser(Paren) {
+    getNxtToken(stream);  // eat '(' token
+    auto content = parseExpression(stream);
+    if(!content) {
+        return nullptr;
+    }
+    if(curToken != ')') {
+        return Util::logUptrErr<Expr>("expected ')'");
+    }
+    getNxtToken(stream);  // eat ')' token
+    return content;
+}
+
+/// identifierexpr
+///   ::= identifier
+///   ::= identifier '(' expression* ')'
+ExprParser(Identifier) {
+    std::string idName = getIdentifierStr();
+    getNxtToken(stream);
+    if(curToken != '(') {
+        return std::make_unique<VariableExpr>(idName);
+    }
+    // call
+    getNxtToken(stream);
+    std::vector<uptr<Expr>> args;
+    if(curToken == ')') {
+        getNxtToken(stream);  // eat it
+    } else {
+        while(true) {
+            if(auto arg = parseExpression(stream)) {
+                args.push_back(std::move(arg));
+            } else {
+                return nullptr;
+            }
+            if(curToken == ')')
+                break;
+            if(curToken != ',') {
+                return Util::logUptrErr<Expr>("Expected ')' or ',' in argument list");
+            }
+            getNxtToken(stream);
+        }
+    }
+    getNxtToken(stream);  // eat ')'
+    return std::make_unique<CallExpr>(idName, std::move(args));
+}
+
+/// all primary expressions
+/// primary
+///   ::= identifierexpr
+///   ::= numberexpr
+///   ::= parenexpr
+ExprParser(Primary) {
+    switch(curToken) {
+        case Token::tIDENTIFIER: return parseIdentifierExpr(stream);
+        case Token::tNUMBER: return parseNumberExpr(stream);
+        case '(': return parseParenExpr(stream);
+        default: return Util::logUptrErr<Expr>("unknown token when expecting an expression");
+    }
+}
+
+/// expression
+///   ::= primary binoprhs
+///
+uptr<Expr> parseExpression(std::istream& stream) {
+    auto lhs = parsePrimaryExpr(stream);
+    if(!lhs)
+        return nullptr;
+    return parseBinOpRHS(0, std::move(lhs), stream);
+}
+
+/// binoprhs
+///   ::= ('+' primary)*
+/// @param exprPrec the token prec of previously op
+uptr<Expr> parseBinOpRHS(int exprPrec, uptr<Expr> lhs, std::istream& stream) {
+    // lhs(end with op(exprPrec)) binOp(tokenPrec) rhs newOp(newPrec) ...
+    while(true) {
+        int tokenPrec = getTokenPrecedence();
+        // maybe token is valid
+        if(tokenPrec < exprPrec)
+            // and it is the last return point, when it encounter other chars(prec is 0)
+            // if there's no error
+            // or not consume this token, return lhs, waiting nxt parse
+            return lhs;
+        int binOp = curToken;  // eat now op
+        getNxtToken(stream);
+        auto rhs = parsePrimaryExpr(stream);
+        if(!rhs)
+            return nullptr;
+        // now new op
+        int newPrec = getTokenPrecedence();
+        if(tokenPrec < newPrec) {
+            // should be lhs binOp (rhs new Op ...), merge rhs
+            rhs = parseBinOpRHS(
+                /* for tokenPrec < exprPrec, therefore do not use <= */
+                tokenPrec + 1,
+                std::move(rhs),
+                stream);
+            if(!rhs)
+                return nullptr;
+        }
+        // otherwise(or have merged rhs), now  is (lhs binOp rhs) newOp, merge lhs
+        lhs = std::make_unique<BinaryExpr>(binOp, std::move(lhs), std::move(rhs));
+    }
+}
+
+#undef ExprParser
+
+/// used both for ‘extern’ function declarations as well as function body definitions.
+/// prototype
+///   ::= id '(' id* ')'
+uptr<Prototype> parsePrototype(std::istream& stream) {
+    if(curToken != Token::tIDENTIFIER) {
+        return Util::logUptrErr<Prototype>("Expected function name in prototype");
+    }
+
+    std::string fnName = getIdentifierStr();
+    getNxtToken(stream);
+
+    // list of arg names
+    std::vector<std::string> argNames;
+    while(getNxtToken(stream) == Token::tIDENTIFIER) {
+        argNames.push_back(getIdentifierStr());
+    }
+
+    if(curToken != ')') {
+        return Util::logUptrErr<Prototype>("Expected ')' in prototype");
+    }
+
+    getNxtToken(stream);  // eat ')'
+    return std::make_unique<Prototype>(fnName, std::move(argNames));
+}
+
+uptr<Function> parseFuncDefinition(std::istream& stream) {
+    getNxtToken(stream);  // eat def
+    auto protoType = parsePrototype(stream);
+    if(!protoType)
+        return nullptr;
+
+    if(auto body = parseExpression(stream)) {
+        return std::make_unique<Function>(std::move(protoType), std::move(body));
+    }
+    return nullptr;
+}
+
+uptr<Prototype> parseExtern(std::istream& stream) {
+    getNxtToken(stream);  // eat 'extern'
+    return parsePrototype(stream);
+}
+
+/// let the user type in arbitrary top-level expressions and evaluate them on the fly.
+///  We will handle this by defining anonymous nullary (zero argument) functions for them.
+/// toplevelexpr ::= expression
+uptr<Function> parseToLevelExpr(std::istream& stream) {
+    if(auto expr = parseExpression(stream)) {
+        auto protoType = std::make_unique<Prototype>("", std::vector<std::string>{});
+        return std::make_unique<Function>(std::move(protoType), std::move(expr));
+    }
+    return nullptr;
+}
+
+/// top ::= definition | external | expression | ';'
+void astParse(std::istream& stream) {
+    getNxtToken(stream);
+    std::println("start parsing");
+    while(true) {
+        std::println("Parse {}", curToken);
+        switch(curToken) {
+            case Token::tEOF: return;
+            // Having top-level semicolons allows the parser know you are done, split.
+            case ';': getNxtToken(stream); break;
+            case Token::tDEF: parseFuncDefinition(stream); break;
+            case Token::tEXTERN: parseExtern(stream); break;
+            default: parseToLevelExpr(stream); break;
+        }
+    }
+}
+}  // namespace Kaleidoscope::Parser
+
+#undef uptr

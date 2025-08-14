@@ -1,0 +1,6 @@
+CompileFlags:
+  Add: ["-fimplicit-modules", "-fimplicit-module-maps"]
+
+Completion:
+  AllScopes: Yes
+  ArgumentLists: FullPlaceholders
