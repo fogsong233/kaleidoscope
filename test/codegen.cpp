@@ -58,7 +58,7 @@ void astParseWithCodegen(std::istream& stream) {
                 break;
             }
             default: {
-                auto exp = Parser::parseToLevelExpr(stream);
+                auto exp = Parser::parseTopLevelExpr(stream);
                 printCodegen(std::move(exp));
                 break;
             }
@@ -66,10 +66,22 @@ void astParseWithCodegen(std::istream& stream) {
     }
 }
 
-TEST(codegen, codegen) {
+TEST(CodegenTest, codegen1) {
     std::istringstream input("def foo(x y) x + y\n" "extern bar(x);\n" "foo(1, 2);\n" "bar(3);\n");
+    astParseWithCodegen(input);
+}
 
-    initLLVM();
-    Parser::defaultBinopPrecedenceCtor();
+TEST(CodegenTest, codegen2) {
+    std::istringstream input("def tst(x) 1 + 2 + x");
+    astParseWithCodegen(input);
+}
+
+TEST(CodegenTest, codegenWithOpt) {
+    std::istringstream input("def test(x) (1+2+x)*(x+(1+2));");
+    astParseWithCodegen(input);
+}
+
+TEST(CodegenTest, topLevel) {
+    std::istringstream input("4 + 5; 3 + 1;");
     astParseWithCodegen(input);
 }

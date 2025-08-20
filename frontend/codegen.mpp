@@ -9,6 +9,21 @@ module;
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Analysis/LoopAnalysisManager.h"
+#include "llvm/Analysis/CGSCCPassManager.h"
+#include "llvm/IR/PassInstrumentation.h"
+#include "llvm/Support/TargetSelect.h"
+
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/StandardInstrumentations.h"
+
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Scalar/Reassociate.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
+
+#include "./headers/KaleidoscopeJIT.h"
 export module kaleidoscope:codegen;
 import std;
 import :ast;
@@ -16,32 +31,108 @@ import :util;
 
 #define uptr std::unique_ptr
 
-namespace Kaleidoscope::Codegen {
-using namespace llvm;
-uptr<LLVMContext> theContext;
-uptr<IRBuilder<>> IRBuilder;
-uptr<Module> theModule;
-std::map<std::string, Value*> nameValues;
+using llvm::orc::KaleidoscopeJIT;
+
+export namespace Kaleidoscope::Codegen {
+uptr<llvm::LLVMContext> theContext;
+uptr<llvm::IRBuilder<>> IRBuilder;
+uptr<llvm::Module> theModule;
+std::map<std::string, llvm::Value*> nameValues;
+std::map<std::string, uptr<AST::Prototype>> functionProtos;
+
+uptr<KaleidoscopeJIT> theJIT;
+
+namespace opt {
+uptr<llvm::FunctionPassManager> theFuncPM;
+uptr<llvm::LoopAnalysisManager> theLoopAM;
+uptr<llvm::FunctionAnalysisManager> theFuncAM;
+uptr<llvm::CGSCCAnalysisManager> theCGAM;
+uptr<llvm::ModuleAnalysisManager> theMdAM;
+uptr<llvm::PassInstrumentationCallbacks> thePICb;
+uptr<llvm::StandardInstrumentations> theSI;
+}  // namespace opt
+
+void InitializeModuleAndManager() {
+    using namespace llvm;
+    theContext = std::make_unique<LLVMContext>();
+    theModule = std::make_unique<Module>("my jit", *theContext);
+    theModule->setDataLayout(theJIT->getDataLayout());
+
+    IRBuilder = std::make_unique<llvm::IRBuilder<>>(*theContext);
+
+    // init for optimize
+    // Create new pass and analysis managers.
+    opt::theFuncPM = std::make_unique<FunctionPassManager>();
+    opt::theFuncAM = std::make_unique<FunctionAnalysisManager>();
+    opt::theLoopAM = std::make_unique<LoopAnalysisManager>();
+    opt::theCGAM = std::make_unique<CGSCCAnalysisManager>();
+    opt::theMdAM = std::make_unique<ModuleAnalysisManager>();
+    opt::thePICb = std::make_unique<PassInstrumentationCallbacks>();
+    opt::theSI = std::make_unique<StandardInstrumentations>(*theContext, true);
+    opt::theSI->registerCallbacks(*opt::thePICb, opt::theMdAM.get());
+
+    // Add transform passes.
+    // Do simple "peephole" optimizations and bit-twiddling optzns.
+    // eg: x*2 => x + 2
+    opt::theFuncPM->addPass(InstCombinePass());
+    // Reassociate expressions. eg: (x * 2) * 4 => x * 8
+    opt::theFuncPM->addPass(ReassociatePass());
+    // Eliminate Common SubExpressions.
+    opt::theFuncPM->addPass(GVNPass());
+    // Simplify the control flow graph (deleting unreachable blocks, etc).
+    opt::theFuncPM->addPass(SimplifyCFGPass());
+
+    // Register analysis passes used in these transform passes.
+    PassBuilder pb;
+    pb.registerFunctionAnalyses(*opt::theFuncAM);
+    pb.registerModuleAnalyses(*opt::theMdAM);
+    pb.crossRegisterProxies(*opt::theLoopAM, *opt::theFuncAM, *opt::theCGAM, *opt::theMdAM);
+}
+
+llvm::Function* getFunction(std::string name) {
+    // First, see if the function has already been added to the current module.
+    if(auto* func = theModule->getFunction(name))
+        return func;
+
+    // If not, check whether we can codegen the declaration from some existing
+    // prototype.
+
+    auto funcProto = functionProtos.find(name);
+    if(funcProto != functionProtos.end()) {
+        return funcProto->second->codegen();
+    }
+
+    // If no existing prototype exists, return null.
+    return nullptr;
+}
 }  // namespace Kaleidoscope::Codegen
 
 export namespace Kaleidoscope {
 
 using namespace Codegen;
 
-void initLLVM() {
-    theContext = std::make_unique<LLVMContext>();
-    theModule = std::make_unique<llvm::Module>("my jit", *theContext);
+using namespace llvm;
 
-    IRBuilder = std::make_unique<llvm::IRBuilder<>>(*theContext);
+void initLLVM() {
+    using namespace llvm;
+
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+    // jit
+    theJIT = Util::exitOnErr(KaleidoscopeJIT::Create());
+
+    InitializeModuleAndManager();
 }
 
 #define CodegenFor(ExprName) llvm::Value* ExprName::codegen()
 
 CodegenFor(AST::NumberExpr) {
-    return llvm::ConstantFP::get(*theContext, APFloat(this->val));
+    return llvm::ConstantFP::get(*theContext, llvm::APFloat(this->val));
 }
 
 CodegenFor(AST::VariableExpr) {
+    // from function parameters
     auto* value = nameValues[this->name];
     if(!value) {
         Util::logErr<llvm::Value>("Unkown variable name");
@@ -69,7 +160,7 @@ CodegenFor(AST::BinaryExpr) {
 }
 
 CodegenFor(AST::CallExpr) {
-    auto* calleeFunc = theModule->getFunction(this->callee);
+    auto* calleeFunc = getFunction(this->callee);
     if(!calleeFunc) {
         return Util::logErr<llvm::Value>("Unknown function to call");
     }
@@ -108,7 +199,10 @@ llvm::Function* AST::Prototype::codegen() {
 };
 
 llvm::Function* AST::Function::codegen() {
-    auto* theFunc = theModule->getFunction(this->proto->name);
+
+    auto& proto = *(this->proto);
+    functionProtos[proto.getName()] = std::move(this->proto);
+    auto* theFunc = getFunction(proto.name);
 
     if(!theFunc) {
         theFunc = this->proto->codegen();
@@ -135,6 +229,7 @@ llvm::Function* AST::Function::codegen() {
         IRBuilder->CreateRet(retVal);
         // Validate the generated code, checking for consistency.
         llvm::verifyFunction(*theFunc);
+        opt::theFuncPM->run(*theFunc, *opt::theFuncAM);
         return theFunc;
     }
     // error reading body, remove function

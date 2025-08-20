@@ -1,0 +1,6 @@
+[33mWelcome to Kaleidoscope Jit Env:[0m
+[34mready> [0mdefine double @__anon_expr() {
+entry:
+  ret double 4.000000e+00
+}
+[32mEvaluated to 4[0m

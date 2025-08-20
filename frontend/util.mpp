@@ -1,25 +1,61 @@
 module;
+#include "llvm/Support/Error.h"
 export module kaleidoscope:util;
 import std;
 
 #define uptr std::unique_ptr
 
+export namespace Kaleidoscope::Text {
+// 定义一些颜色常量
+enum class Color {
+    Reset = 0,
+    Red = 31,
+    Green = 32,
+    Yellow = 33,
+    Blue = 34,
+    Magenta = 35,
+    Cyan = 36,
+    White = 37,
+    Bold = 1
+};
+
+// colorize 函数
+std::string colorize(Color c, const std::string& text) {
+    return "\033[" + std::to_string(static_cast<int>(c)) + "m" + text + "\033[0m";
+}
+}  // namespace Kaleidoscope::Text
+
 export namespace Kaleidoscope::Util {
 template <typename AST>
 uptr<AST> logUptrErr(const char* msg) {
     std::cerr << std::format("Error: {}\n", msg);
+    std::exit(0);
     return nullptr;
 }
 
 template <typename T>
 T* logErr(const char* msg) {
     std::cerr << std::format("Error: {}\n", msg);
+    std::exit(0);
     return nullptr;
+}
+
+void dLog(const std::string& msg, std::source_location loc = std::source_location()) {
+#ifdef KF_DEBUG_MODE
+    std::println("[Frontend {}:{}]{}",
+                 loc.file_name(),
+                 loc.line(),
+                 Text::colorize(Text::Color::Bold, msg));
+#endif  // DEBUG
 }
 
 template <typename>
 constexpr bool depTrue = true;
 
+inline llvm::ExitOnError exitOnErr;
+
 }  // namespace Kaleidoscope::Util
+
+// namespace Kaleidoscope::Text
 
 #undef uptr

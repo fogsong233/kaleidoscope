@@ -8,7 +8,6 @@ using namespace Kaleidoscope;
 TEST(AST, checkAST1) {
     using namespace Parser;
     auto ss1 = std::stringstream{"def foo(x y) x+foo(y, 4.0);"};
-    defaultBinopPrecedenceCtor();
     astParse(ss1);
     auto ss2 = std::stringstream{"extern foo(x y);"};
     astParse(ss2);

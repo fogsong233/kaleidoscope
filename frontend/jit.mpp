@@ -1,0 +1,89 @@
+module;
+// for command input and immediately use
+#include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
+#include <assert.h>
+export module kaleidoscope:jit;
+import std;
+import :ast;
+import :codegen;
+import :util;
+
+export namespace Kaleidoscope::Jit {
+using namespace Parser;
+using namespace Codegen;
+
+namespace Handler {
+void handleTopLevelExpr(std::istream& stream) {
+    if(auto fnAst = parseTopLevelExpr(stream)) {
+        if(auto fnIR = fnAst->codegen()) {
+            fnIR->print(llvm::outs());
+            // Create a ResourceTracker to track JIT'd memory allocated to our
+            // anonymous expression -- that way we can free it after executing.
+            auto resTracker = theJIT->getMainJITDylib().createResourceTracker();
+            auto thrdSafeMd =
+                llvm::orc::ThreadSafeModule(std::move(theModule), std::move(theContext));
+            Util::exitOnErr(theJIT->addModule(std::move(thrdSafeMd), resTracker));
+            InitializeModuleAndManager();
+
+            auto exprSym = Util::exitOnErr(theJIT->lookup("__anon_expr"));
+            assert(exprSym.getAddress() && "Function not found");
+
+            // Get the symbol's address and cast it to the right type (takes no
+            // arguments, returns a double(), no parameters(anonymous expr),
+            // so we can call it as a native function.
+            double (*fnPtr)() = exprSym.getAddress().toPtr<double (*)()>();
+            std::println(
+                "{}",
+                Text::colorize(Text::Color::Green, std::format("Evaluated to {}", fnPtr())));
+
+            // Delete the anonymous expression module from the JIT.
+            Util::exitOnErr(resTracker->remove());
+        }
+    }
+}
+
+void handleDefinition(std::istream& stream) {
+    if(auto fnAST = Parser::parseFuncDefinition(stream)) {
+        if(auto* fnIR = fnAST->codegen()) {
+            fnIR->print(llvm::outs());
+            Util::exitOnErr(theJIT->addModule(
+                orc::ThreadSafeModule(std::move(theModule), std::move(theContext))));
+            Codegen::InitializeModuleAndManager();
+        }
+    } else {
+        // Skip token for error recovery.
+        getNxtToken(stream);
+    }
+}
+
+void handleExtern(std::istream& stream) {
+    if(auto protoAST = Parser::parseExtern(stream)) {
+        if(auto* fnIR = protoAST->codegen()) {
+            fnIR->print(llvm::outs());
+            Codegen::functionProtos[protoAST->name] = std::move(protoAST);
+        }
+    } else {
+        // Skip token for error recovery.
+        getNxtToken(stream);
+    }
+}
+}  // namespace Handler
+
+void startJitConsole() {
+    using namespace Handler;
+    std::println("{}", Text::colorize(Text::Color::Yellow, "Welcome to Kaleidoscope Jit Env"));
+    std::print("{}", Text::colorize(Text::Color::Blue, "ready> "));
+    getNxtToken(std::cin);
+    while(true) {
+        switch(curToken) {
+            case Token::tEOF: return;
+            // Having top-level semicolons allows the parser know you are done, split.
+            case ';': getNxtToken(std::cin); break;
+            case Token::tDEF: handleDefinition(std::cin); break;
+            case Token::tEXTERN: handleExtern(std::cin); break;
+            default: handleTopLevelExpr(std::cin); break;
+        }
+        std::print("{}", Text::colorize(Text::Color::Blue, "ready> "));
+    }
+}
+}  // namespace Kaleidoscope::Jit

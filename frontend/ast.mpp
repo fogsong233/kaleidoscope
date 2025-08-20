@@ -2,9 +2,10 @@ module;
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 export module kaleidoscope:ast;
+
+import std;
 import :lexer;
 import :util;
-import std;
 
 #define uptr std::unique_ptr
 
@@ -282,9 +283,9 @@ uptr<Prototype> parseExtern(std::istream& stream) {
 /// let the user type in arbitrary top-level expressions and evaluate them on the fly.
 ///  We will handle this by defining anonymous nullary (zero argument) functions for them.
 /// toplevelexpr ::= expression
-uptr<Function> parseToLevelExpr(std::istream& stream) {
+uptr<Function> parseTopLevelExpr(std::istream& stream) {
     if(auto expr = parseExpression(stream)) {
-        auto protoType = std::make_unique<Prototype>("", std::vector<std::string>{});
+        auto protoType = std::make_unique<Prototype>("__anon_expr", std::vector<std::string>{});
         return std::make_unique<Function>(std::move(protoType), std::move(expr));
     }
     return nullptr;
@@ -293,7 +294,6 @@ uptr<Function> parseToLevelExpr(std::istream& stream) {
 /// top ::= definition | external | expression | ';'
 void astParse(std::istream& stream) {
     getNxtToken(stream);
-    std::println("start parsing");
     while(true) {
         std::println("Parse {}", curToken);
         switch(curToken) {
@@ -302,7 +302,7 @@ void astParse(std::istream& stream) {
             case ';': getNxtToken(stream); break;
             case Token::tDEF: parseFuncDefinition(stream); break;
             case Token::tEXTERN: parseExtern(stream); break;
-            default: parseToLevelExpr(stream); break;
+            default: parseTopLevelExpr(stream); break;
         }
     }
 }

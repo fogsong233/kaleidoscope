@@ -1,5 +1,6 @@
 export module kaleidoscope:lexer;
 import std;
+import :util;
 
 export namespace Kaleidoscope::Token {
 // The lexer returns tokens [0-255] if it is an unknown character, otherwise one
@@ -42,11 +43,14 @@ export int strParseToToken(std::istream& stream) {
             _identifierStr += lastChar;
 
         if(_identifierStr == "def") {
+            Util::dLog(std::format("Get token DEF"));
             return Token::tDEF;
         }
         if(_identifierStr == "extern") {
+            Util::dLog(std::format("Get token Extern"));
             return Token::tEXTERN;
         }
+        Util::dLog("Get token ID");
         return Token::tIDENTIFIER;
     }
 
@@ -56,6 +60,7 @@ export int strParseToToken(std::istream& stream) {
             numStr += lastChar;
         }
         _numVal = std::strtod(numStr.c_str(), nullptr);  // TODO: parse valid check
+        Util::dLog(std::format("Get token Num: {}", _numVal));
         return Token::tNUMBER;
     }
 
@@ -68,12 +73,14 @@ export int strParseToToken(std::istream& stream) {
 
     if(lastChar == std::char_traits<char>::eof()) {
         lastChar = ' ';
+        Util::dLog(std::format("Get token EOF"));
         return Token::tEOF;
     }
 
     // otherwise, normal ascii char
     auto thisChar = lastChar;
     lastChar = stream.get();
+    Util::dLog(std::format("Get token: {}", thisChar));
     return thisChar;
 }
 

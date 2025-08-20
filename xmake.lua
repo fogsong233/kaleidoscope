@@ -7,7 +7,7 @@ set_toolchains("clang")
 
 set_languages("c++23")
 
-add_cxflags("-stdlib=libc++", "-Wno-c++20-compat", "-Wno-reserved-user-defined-literal",{force = true})
+add_cxflags("-stdlib=libc++", "-Wno-c++20-compat", "-Wno-reserved-user-defined-literal", {force = true})
 
 add_requires("gtest", {configs = {cxflags = "-stdlib=libc++"}, system=false })
 
@@ -36,6 +36,7 @@ target("frontend")
     add_files("frontend/*.mpp", {public = true})
     add_files("frontend/*.cpp")
     set_policy("build.c++.modules", true)
+    -- add_defines("KF_DEBUG_MODE")
 
 target("main")
     set_kind("binary")
